@@ -7,6 +7,7 @@ use std::time::Duration;
 use std::option::Option;
 
 static POLLING_PERIOD_OPTION_NAME : &'static str = "DEUCALION_POLLING_PERIOD";
+static AWS_REGION_OPTION_NAME : &'static str = "DEUCALION_AWS_REGION";
 static AWS_CREDENTIALS_PROVIDER_OPTION_NAME : &'static str = "DEUCALION_AWS_CREDENTIALS_PROVIDER";
 static LISTEN_ON_OPTION_NAME : &'static str = "DEUCALION_LISTEN_ON";
 static READ_TIMEOUT_OPTION_NAME : &'static str = "DEUCALION_READ_TIMEOUT";
@@ -20,58 +21,70 @@ pub enum ConfigError {
 }
 
 #[derive(Copy, Debug, PartialEq, Eq, Hash, Clone)]
-pub enum AwsCredentialsProvider {
+pub enum AwsCredentialsProviderType {
+    Default,
     Environment,
     Profile,
     Instance,
     Container
 }
 
-impl Default for AwsCredentialsProvider {
-    fn default() -> AwsCredentialsProvider {
-        AwsCredentialsProvider::Environment
+impl Default for AwsCredentialsProviderType {
+    fn default() -> AwsCredentialsProviderType {
+        AwsCredentialsProviderType::Default
     }
 }
 
-impl FromStr for AwsCredentialsProvider {
+impl FromStr for AwsCredentialsProviderType {
     type Err = ();
 
-    fn from_str(s: &str) -> Result<AwsCredentialsProvider, ()> {
+    fn from_str(s: &str) -> Result<AwsCredentialsProviderType, ()> {
         match s {
-            "Environment" => Ok(AwsCredentialsProvider::Environment),
-            "Profile" => Ok(AwsCredentialsProvider::Profile),
-            "Instance" => Ok(AwsCredentialsProvider::Instance),
-            "Container" => Ok(AwsCredentialsProvider::Container),
+            "Environment" => Ok(AwsCredentialsProviderType::Environment),
+            "Profile" => Ok(AwsCredentialsProviderType::Profile),
+            "Instance" => Ok(AwsCredentialsProviderType::Instance),
+            "Container" => Ok(AwsCredentialsProviderType::Container),
             _ => Err(())
         }
     }
 }
 
-pub trait ExporterConfigurationProvider {
+pub trait AwsSettingsProvider {
     fn polling_period(&self) -> Option<Duration>;
-    fn aws_credentials_provider(&self) -> AwsCredentialsProvider;
+    fn aws_credentials_provider(&self) -> AwsCredentialsProviderType;
+    fn aws_region(&self) -> String;
+}
+
+pub trait ExporterConfigurationProvider {
     fn listen_on(&self) -> SocketAddr;
     fn read_timeout(&self) -> Option<Duration>;
     fn keep_alive_timeout(&self) -> Option<Duration>;
 }
 
-pub struct EnvConfig {
+pub struct EnvironmentSettingsProvider {
     polling_period: Option<u64>,
-    aws_credentials_provider: Option<AwsCredentialsProvider>,
+    aws_credentials_provider: Option<AwsCredentialsProviderType>,
+    aws_region: String,
     listen_on: SocketAddr,
     read_timeout: Option<u64>,
     keep_alive_timeout: Option<u64>
 }
 
-impl ExporterConfigurationProvider for EnvConfig {
+impl AwsSettingsProvider for EnvironmentSettingsProvider {
     fn polling_period(&self) -> Option<Duration> {
         self.polling_period.map(|s| Duration::from_secs(s))
     }
 
-    fn aws_credentials_provider(&self) -> AwsCredentialsProvider {
-        self.aws_credentials_provider.unwrap_or(AwsCredentialsProvider::default())
+    fn aws_credentials_provider(&self) -> AwsCredentialsProviderType {
+        self.aws_credentials_provider.unwrap_or(AwsCredentialsProviderType::default())
     }
 
+    fn aws_region(&self) -> String {
+        self.aws_region.clone()
+    }
+}
+
+impl ExporterConfigurationProvider for EnvironmentSettingsProvider {
 
     fn listen_on(&self) -> SocketAddr {
         self.listen_on
@@ -105,12 +118,13 @@ fn get_env_option_setting<T: FromStr>(name: &'static str) -> Result<Option<T>, C
     }
 }
 
-impl EnvConfig{
+impl EnvironmentSettingsProvider {
     pub fn new() -> Result<Self, ConfigError>
     {
-        Ok(EnvConfig{
+        Ok(EnvironmentSettingsProvider {
                 polling_period: get_env_option_setting(POLLING_PERIOD_OPTION_NAME)?,
                 aws_credentials_provider: get_env_option_setting(AWS_CREDENTIALS_PROVIDER_OPTION_NAME)?,
+                aws_region: get_env_setting(AWS_REGION_OPTION_NAME)?,
                 listen_on: get_env_setting(LISTEN_ON_OPTION_NAME)?,
                 read_timeout: get_env_option_setting(READ_TIMEOUT_OPTION_NAME)?,
                 keep_alive_timeout: get_env_option_setting(KEEP_ALIVE_TIMEOUT_OPTION_NAME)?
