@@ -6,6 +6,7 @@ extern crate lazy_static;
 extern crate dotenv;
 extern crate rusoto;
 extern crate ctrlc;
+extern crate yaml_rust;
 
 mod config;
 mod poller;
@@ -15,7 +16,7 @@ mod termination;
 
 use std::time::Duration;
 use hyper::server::Server;
-use config::{ExporterConfigurationProvider, AwsSettingsProvider};
+use config::{ScrapeSettingsProvider, PollerSettingsProvider};
 use server::DeucalionHandler;
 use poller::AwsPoller;
 use periodic::AsyncPeriodicRunner;
@@ -35,9 +36,11 @@ fn inject_environment() {
 fn main() {
     inject_environment();
 
-    let config = config::EnvironmentSettingsProvider::new().unwrap();
-    let poller = AwsPoller::new(&config).unwrap();
-    let polling_period = config.polling_period().unwrap_or(Duration::from_secs(5));
+    let config = config::DeucalionSettings::from_filename("config.yml")
+        .expect("Could not load configuration");
+    let poller = AwsPoller::new(&config)
+        .expect("Could not initialize AWS poller");
+    let polling_period = config.polling_period().unwrap_or(Duration::from_secs(10));
 
     println!("listening address {:?} {:?} {:?}", config.listen_on(),
         config.read_timeout(), config.keep_alive_timeout());

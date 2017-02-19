@@ -27,7 +27,7 @@ impl AsyncPeriodicRunner
                     let sleep_duration = if elapsed < poll_period {
                         poll_period - elapsed
                     } else {
-                        println!("Poller is running too long: {:?}. Consider reducing poll period.",
+                        println!("Poller is running too long: {:?}. Consider increasing poll period.",
                                  elapsed);
                         Duration::from_secs(0)
                     };

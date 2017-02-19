@@ -2,23 +2,50 @@
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::result::Result;
-use std::env;
 use std::time::Duration;
 use std::option::Option;
-
-static POLLING_PERIOD_OPTION_NAME : &'static str = "DEUCALION_POLLING_PERIOD";
-static AWS_REGION_OPTION_NAME : &'static str = "DEUCALION_AWS_REGION";
-static AWS_CREDENTIALS_PROVIDER_OPTION_NAME : &'static str = "DEUCALION_AWS_CREDENTIALS_PROVIDER";
-static LISTEN_ON_OPTION_NAME : &'static str = "DEUCALION_LISTEN_ON";
-static READ_TIMEOUT_OPTION_NAME : &'static str = "DEUCALION_READ_TIMEOUT";
-static KEEP_ALIVE_TIMEOUT_OPTION_NAME : &'static str = "DEUCALION_KEEP_ALIVE_TIMEOUT";
+use std::io;
+use std::io::Read;
+use std::error::Error;
+use yaml_rust::{YamlLoader, Yaml, ScanError};
+use std::fs::File;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ConfigError {
+    IoError(String),
+    SyntaxError(String),
     OptionNotFound(String),
-    OptionFailedToParse(String),
-    BadOptionValue(String, String)
+    BadOptionValue(String)
 }
+
+impl From<io::Error> for ConfigError {
+    fn from(e: io::Error) -> Self {
+        ConfigError::IoError(String::from(e.description()))
+    }
+}
+
+impl From<ScanError> for ConfigError {
+    fn from(e: ScanError) -> Self {
+        ConfigError::SyntaxError(String::from(e.description()))
+    }
+}
+
+/*
+impl Error for ConfigError {
+    fn description(&self) -> &str {
+        match *self {
+            ConfigError::IoError(s) => &s,
+            ConfigError::SyntaxError(s) => &s,
+            ConfigError::OptionNotFound(s) => &s,
+            ConfigError::BadOptionValue(s) => &s
+        }
+    }
+
+    fn cause(&self) -> Option<&Error> {
+        None
+    }
+}
+*/
 
 #[derive(Copy, Debug, PartialEq, Eq, Hash, Clone)]
 pub enum AwsCredentialsProviderType {
@@ -44,170 +71,114 @@ impl FromStr for AwsCredentialsProviderType {
             "Profile" => Ok(AwsCredentialsProviderType::Profile),
             "Instance" => Ok(AwsCredentialsProviderType::Instance),
             "Container" => Ok(AwsCredentialsProviderType::Container),
+            "Default" => Ok(AwsCredentialsProviderType::Default),
             _ => Err(())
         }
     }
 }
 
-pub trait AwsSettingsProvider {
+pub trait PollerSettingsProvider {
     fn polling_period(&self) -> Option<Duration>;
-    fn aws_credentials_provider(&self) -> AwsCredentialsProviderType;
-    fn aws_region(&self) -> String;
+    fn credentials_provider(&self) -> AwsCredentialsProviderType;
+    fn region(&self) -> String;
 }
 
-pub trait ExporterConfigurationProvider {
+pub trait ScrapeSettingsProvider {
     fn listen_on(&self) -> SocketAddr;
     fn read_timeout(&self) -> Option<Duration>;
     fn keep_alive_timeout(&self) -> Option<Duration>;
 }
 
-pub struct EnvironmentSettingsProvider {
+struct PollerSettings {
     polling_period: Option<u64>,
-    aws_credentials_provider: Option<AwsCredentialsProviderType>,
-    aws_region: String,
+    credentials_provider: Option<AwsCredentialsProviderType>,
+    region: String,
+}
+
+struct  ScrapeSettings {
     listen_on: SocketAddr,
     read_timeout: Option<u64>,
     keep_alive_timeout: Option<u64>
 }
 
-impl AwsSettingsProvider for EnvironmentSettingsProvider {
+pub struct DeucalionSettings {
+    aws_settings: PollerSettings,
+    scrape_settings: ScrapeSettings
+}
+
+impl PollerSettingsProvider for DeucalionSettings {
     fn polling_period(&self) -> Option<Duration> {
-        self.polling_period.map(|s| Duration::from_secs(s))
+        self.aws_settings.polling_period.map(|s| Duration::from_secs(s))
     }
 
-    fn aws_credentials_provider(&self) -> AwsCredentialsProviderType {
-        self.aws_credentials_provider.unwrap_or(AwsCredentialsProviderType::default())
+    fn credentials_provider(&self) -> AwsCredentialsProviderType {
+        self.aws_settings.credentials_provider.unwrap_or(AwsCredentialsProviderType::default())
     }
 
-    fn aws_region(&self) -> String {
-        self.aws_region.clone()
+    fn region(&self) -> String {
+        self.aws_settings.region.clone()
     }
 }
 
-impl ExporterConfigurationProvider for EnvironmentSettingsProvider {
+impl ScrapeSettingsProvider for DeucalionSettings {
 
     fn listen_on(&self) -> SocketAddr {
-        self.listen_on
+        self.scrape_settings.listen_on
     }
 
     fn read_timeout(&self) -> Option<Duration> {
-        self.read_timeout.map(|s| Duration::from_secs(s))
+        self.scrape_settings.read_timeout.map(|s| Duration::from_secs(s))
     }
 
     fn keep_alive_timeout(&self) -> Option<Duration> {
-        self.keep_alive_timeout.map(|s| Duration::from_secs(s))
+        self.scrape_settings.keep_alive_timeout.map(|s| Duration::from_secs(s))
     }
 }
 
-fn get_env_setting<T: FromStr>(name: &'static str) -> Result<T, ConfigError> {
-    match env::var(name) {
-        Err(env::VarError::NotPresent) => Err(ConfigError::OptionNotFound(name.to_string())),
-        Err(env::VarError::NotUnicode(_)) => Err(ConfigError::OptionFailedToParse(name.to_string())),
-        Ok(v) => T::from_str(&v).map_err(
-            |_| ConfigError::BadOptionValue(name.to_string(), v)
-        )
-    }
-}
-
-fn get_env_option_setting<T: FromStr>(name: &'static str) -> Result<Option<T>, ConfigError> {
-    let setting : Result<T, ConfigError> = get_env_setting(name);
-    match setting {
-        Err(ConfigError::OptionNotFound(_)) => Ok(None),
-        Err(e) => Err(e),
-        Ok(v) => Ok(Some(v))
-    }
-}
-
-impl EnvironmentSettingsProvider {
-    pub fn new() -> Result<Self, ConfigError>
-    {
-        Ok(EnvironmentSettingsProvider {
-                polling_period: get_env_option_setting(POLLING_PERIOD_OPTION_NAME)?,
-                aws_credentials_provider: get_env_option_setting(AWS_CREDENTIALS_PROVIDER_OPTION_NAME)?,
-                aws_region: get_env_setting(AWS_REGION_OPTION_NAME)?,
-                listen_on: get_env_setting(LISTEN_ON_OPTION_NAME)?,
-                read_timeout: get_env_option_setting(READ_TIMEOUT_OPTION_NAME)?,
-                keep_alive_timeout: get_env_option_setting(KEEP_ALIVE_TIMEOUT_OPTION_NAME)?
-            }
-        )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::env;
-
-    fn set_up() {
-        env::set_var(LISTEN_ON_OPTION_NAME, "127.0.0.1:80");
-        env::set_var(READ_TIMEOUT_OPTION_NAME, "60");
-        env::set_var(KEEP_ALIVE_TIMEOUT_OPTION_NAME, "180")
+impl DeucalionSettings {
+    fn from_doc<T: FromStr>(doc: &Yaml, option_name: &str) -> Result<T, ConfigError> {
+        let s = doc[option_name].as_str().ok_or(ConfigError::OptionNotFound(String::from(option_name)))?;
+        T::from_str(s).map_err(|_|ConfigError::BadOptionValue(String::from(option_name)))
     }
 
-    fn tear_down() {
-        for n in vec![LISTEN_ON_OPTION_NAME, READ_TIMEOUT_OPTION_NAME, KEEP_ALIVE_TIMEOUT_OPTION_NAME].into_iter() {
-            env::remove_var(n);
+    fn option_from_doc<T: FromStr>(doc: &Yaml, option_name: &str) -> Result<Option<T>, ConfigError> {
+        match Self::from_doc(doc, option_name) {
+            Ok(v) => Ok(Some(v)),
+            Err(ConfigError::OptionNotFound(_)) => Ok(None),
+            Err(e) => Err(e)
         }
     }
 
-    macro_rules! unit_test {
-        ($name:ident $expr:expr) => (
-            #[test]
-            fn $name() {
-                set_up();
-                $expr;
-                tear_down();
+    fn from_yaml_string(s: &str) -> Result<Self, ConfigError>
+    {
+        let doc = &YamlLoader::load_from_str(s).unwrap()[0];
+        let scrape_doc = &doc["scrape"];
+        let poller_doc = &doc["poller"];
+        if scrape_doc.is_badvalue() {
+            Err(ConfigError::OptionNotFound(String::from("Missing scrape configuration section")))?
+        }
+        if poller_doc.is_badvalue() {
+            Err(ConfigError::OptionNotFound(String::from("Missing aws configuration section")))?
+        }
+        Ok(DeucalionSettings {
+            scrape_settings: ScrapeSettings {
+                listen_on: Self::from_doc(scrape_doc, "listen_address")?,
+                keep_alive_timeout: Self::option_from_doc(scrape_doc, "keep_alive_timeout")?,
+                read_timeout: Self::option_from_doc(scrape_doc, "read_timeout")?
+            },
+            aws_settings: PollerSettings {
+                credentials_provider: Self::option_from_doc(poller_doc, "credentials_provider")?,
+                polling_period: Self::option_from_doc(poller_doc, "polling_period")?,
+                region: Self::from_doc(poller_doc, "region")?,
             }
-        )
+        })
     }
 
-    unit_test!(test_listen_on_valid_option {
-        env::set_var(LISTEN_ON_OPTION_NAME, "0.0.0.0:9090");
-        assert_eq!(SocketAddr::from_str("0.0.0.0:9090").unwrap(),
-            EnvConfig::new().unwrap().listen_on());
-    });
-
-    unit_test!(test_listen_on_invalid_option {
-        env::set_var(LISTEN_ON_OPTION_NAME, "asdad");
-        assert_eq!(ConfigError::BadOptionValue(LISTEN_ON_OPTION_NAME.to_string(), "asdad".to_string()),
-            EnvConfig::new().err().unwrap());
-    });
-
-    unit_test!(test_listen_on_not_exists {
-        env::remove_var(LISTEN_ON_OPTION_NAME);
-        assert_eq!(ConfigError::OptionNotFound(LISTEN_ON_OPTION_NAME.to_string()),
-            EnvConfig::new().err().unwrap());
-    });
-
-    unit_test!(test_read_timeout_valid_option {
-        env::set_var(READ_TIMEOUT_OPTION_NAME, "30");
-        assert_eq!(Duration::from_secs(30), EnvConfig::new().unwrap().read_timeout().unwrap());
-    });
-
-    unit_test!(test_read_timeout_invalid_option {
-        env::set_var(READ_TIMEOUT_OPTION_NAME, "das");
-        assert_eq!(ConfigError::BadOptionValue(READ_TIMEOUT_OPTION_NAME.to_string(), "das".to_string()),
-            EnvConfig::new().err().unwrap());
-    });
-
-    unit_test!(test_read_timeout_not_exists {
-        env::remove_var(READ_TIMEOUT_OPTION_NAME);
-        assert_eq!(None, EnvConfig::new().unwrap().read_timeout());
-    });
-
-    unit_test!(test_keep_alive_timeout_valid_option {
-        env::set_var(KEEP_ALIVE_TIMEOUT_OPTION_NAME, "300");
-        assert_eq!(Duration::from_secs(300), EnvConfig::new().unwrap().keep_alive_timeout().unwrap());
-    });
-
-    unit_test!(test_keep_alive_timeout_invalid_option {
-        env::set_var(KEEP_ALIVE_TIMEOUT_OPTION_NAME, "sad");
-        assert_eq!(ConfigError::BadOptionValue(KEEP_ALIVE_TIMEOUT_OPTION_NAME.to_string(), "sad".to_string()),
-            EnvConfig::new().err().unwrap());
-    });
-
-    unit_test!(test_keep_alive_timeout_not_exists {
-        env::remove_var(KEEP_ALIVE_TIMEOUT_OPTION_NAME);
-        assert_eq!(None, EnvConfig::new().unwrap().keep_alive_timeout());
-    });
+    pub fn from_filename(filename: &str) -> Result<Self, ConfigError>
+    {
+        let mut f = File::open(filename)?;
+        let mut buffer = String::new();
+        f.read_to_string(&mut buffer)?;
+        Self::from_yaml_string(buffer.as_ref())
+    }
 }
