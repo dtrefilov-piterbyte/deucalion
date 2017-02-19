@@ -1,7 +1,6 @@
 .idea
 .git
 .metadata
-target/debug
 target/*/.fingerprint
 target/*/build
 target/*/deps
