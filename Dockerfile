@@ -17,15 +17,11 @@ ENV LANG=en-US.UTF-8
 
 RUN mkdir -p /opt/deucalion
 COPY target/release/deucalion /opt/deucalion
+COPY config.yml /opt/deucalion
 RUN chmod +x /opt/deucalion/deucalion
 
 COPY docker-entrypoint.sh /bin/
 RUN chmod +x /bin/docker-entrypoint.sh
-
-ENV DEUCALION_POLLING_PERIOD=10 \
-    DEUCALION_LISTEN_ON=0.0.0.0:9090 \
-    DEUCALION_READ_TIMEOUT=60 \
-    DEUCALION_KEEP_ALIVE_TIMEOUT=1800
 
 EXPOSE 9090
 

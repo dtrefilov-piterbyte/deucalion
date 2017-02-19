@@ -1,0 +1,10 @@
+aws_settings:
+    polling_period: 10
+    region: us-east-1
+    expose_tags: ['team','Owner', 'Laboratory']
+    describe_instances_chunk_size: 50
+
+scrape_settings:
+    listen_on: 0.0.0.0:9090
+    read_timeout: 10
+    keep_alive_timeout: 60

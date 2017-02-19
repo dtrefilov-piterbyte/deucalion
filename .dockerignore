@@ -1,0 +1,10 @@
+.idea
+.git
+.metadata
+target/debug
+target/*/.fingerprint
+target/*/build
+target/*/deps
+target/*/examples
+target/*/native
+

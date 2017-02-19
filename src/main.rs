@@ -6,7 +6,10 @@ extern crate lazy_static;
 extern crate dotenv;
 extern crate rusoto;
 extern crate ctrlc;
-extern crate yaml_rust;
+#[macro_use]
+extern crate serde_derive;
+
+extern crate serde_yaml;
 
 mod config;
 mod poller;
@@ -42,8 +45,6 @@ fn main() {
         .expect("Could not initialize AWS poller");
     let polling_period = config.polling_period().unwrap_or(Duration::from_secs(10));
 
-    println!("listening address {:?} {:?} {:?}", config.listen_on(),
-        config.read_timeout(), config.keep_alive_timeout());
     let mut listening = Server::http(config.listen_on())
         .unwrap()
         .handle(DeucalionHandler::new(TextEncoder::new()))

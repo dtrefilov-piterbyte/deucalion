@@ -10,8 +10,9 @@ hyper =  { version = "0.10" }
 rusoto = { version = "0.22.0", features = [ "ec2", "cloudwatch" ] }
 dotenv = { version = "0.8.0" }
 ctrlc = { version = "2.0", features = ["termination"] }
-yaml-rust = "*"
-
+serde = "0.9"
+serde_derive = "0.9"
+serde_yaml = "0.6"
 
 [profile.release]
 lto = true
