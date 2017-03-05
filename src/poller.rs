@@ -52,12 +52,14 @@ impl From<ec2::DescribeInstancesError> for PollerError {
         match e {
             ec2::DescribeInstancesError::HttpDispatch(dpt) => PollerError::from(dpt),
             ec2::DescribeInstancesError::Credentials(crd) => PollerError::from(crd),
-            ec2::DescribeInstancesError::Validation(s) => PollerError::UnknownError(s),
+            ec2::DescribeInstancesError::Validation(s) => PollerError::InvalidCredentials(s),
             ec2::DescribeInstancesError::Unknown(s) => {
                 if s.contains("DryRunOperation") {
                     PollerError::NoError
                 } else if s.contains("UnauthorizedOperation") {
                     PollerError::InsufficientPermissions(String::from("DescribeInstances"))
+                } else if s.contains("AuthFailure") {
+                    PollerError::InvalidCredentials(s)
                 } else {
                     PollerError::UnknownError(s)
                 }
