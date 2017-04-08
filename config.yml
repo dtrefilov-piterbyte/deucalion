@@ -1,10 +1,10 @@
 aws_settings:
-    polling_period: 10
+    polling_period: 60
     region: us-east-1
-    expose_tags: ['team','Owner', 'Laboratory']
+    expose_tags: ['Name', 'team','Owner', 'Laboratory']
     describe_instances_chunk_size: 50
 
 scrape_settings:
-    listen_on: 0.0.0.0:9090
+    listen_on: 0.0.0.0:8082
     read_timeout: 10
     keep_alive_timeout: 60

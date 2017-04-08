@@ -4,9 +4,7 @@ version = "0.1.0"
 authors = ["Dmitry Trefilov <the-alien@live.ru>"]
 
 [dependencies]
-openssl-sys = { version = "0.9.7" }
 prometheus = { version = "0.2" }
-lazy_static = { version = "0.2.1" }
 hyper =  { version = "0.10" }
 rusoto = { version = "0.22.0", features = [ "ec2", "cloudwatch" ] }
 dotenv = { version = "0.8.0" }
@@ -14,6 +12,7 @@ ctrlc = { version = "2.0", features = ["termination"] }
 serde = "0.9"
 serde_derive = "0.9"
 serde_yaml = "0.6"
+time = "0.1"
 
 [profile.release]
 lto = true

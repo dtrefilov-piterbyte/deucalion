@@ -1,15 +1,12 @@
-#[macro_use]
 extern crate prometheus;
 extern crate hyper;
-#[macro_use]
-extern crate lazy_static;
 extern crate dotenv;
 extern crate rusoto;
 extern crate ctrlc;
 #[macro_use]
 extern crate serde_derive;
-
 extern crate serde_yaml;
+extern crate time;
 
 mod config;
 mod poller;
@@ -24,7 +21,7 @@ use server::DeucalionHandler;
 use poller::AwsPoller;
 use periodic::AsyncPeriodicRunner;
 use termination::TerminationGuard;
-use prometheus::TextEncoder;
+use prometheus::{TextEncoder, Registry};
 
 fn inject_environment() {
     match dotenv::dotenv() {
@@ -41,15 +38,19 @@ fn main() {
 
     let config = config::DeucalionSettings::from_filename("config.yml")
         .expect("Could not load configuration");
-    let poller = AwsPoller::new(&config)
+    let aws_poller = AwsPoller::new(&config)
         .expect("Could not initialize AWS poller");
     let polling_period = config.polling_period().unwrap_or(Duration::from_secs(10));
 
+    let aws_gauges = aws_poller.counters();
+    let registry = Registry::new();
+    registry.register(aws_gauges).unwrap();
+
     let mut listening = Server::http(config.listen_on())
         .unwrap()
-        .handle(DeucalionHandler::new(TextEncoder::new()))
+        .handle(DeucalionHandler::new(TextEncoder::new(), registry))
         .unwrap();
-    let _runner = AsyncPeriodicRunner::new(poller, polling_period);
+    let _runner = AsyncPeriodicRunner::new(aws_poller, polling_period);
     TerminationGuard::new();
 
     let _ = listening.close();

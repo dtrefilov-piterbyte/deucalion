@@ -1,9 +1,10 @@
 use config::{PollerSettingsProvider, AwsCredentialsProviderType};
-use std::result::Result;
-use std::error::Error;
+use std::result::Result as StdResult;
+use std::error::Error as StdError;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::io::{stderr, Write};
 use rusoto::{ProvideAwsCredentials, AwsCredentials, DefaultCredentialsProviderSync, EnvironmentProvider,
              ProfileProvider, InstanceMetadataProvider, ContainerProvider, CredentialsError,
              Region, ParseRegionError, HttpDispatchError};
@@ -11,7 +12,11 @@ use rusoto::ec2;
 use rusoto::default_tls_client;
 use hyper;
 use std::ascii::AsciiExt;
-use std::iter::Iterator;
+use std::iter::{Iterator, IntoIterator};
+use prometheus::{Opts, GaugeVec, Collector};
+use prometheus::Error as PrometheusError;
+use time::precise_time_s;
+use std::collections::HashMap;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum PollerError {
@@ -47,6 +52,12 @@ impl From<HttpDispatchError> for PollerError {
     }
 }
 
+impl From<PrometheusError> for PollerError {
+    fn from(error: PrometheusError) -> Self {
+        PollerError::UnknownError(String::from(error.description()))
+    }
+}
+
 impl From<ec2::DescribeInstancesError> for PollerError {
     fn from(e: ec2::DescribeInstancesError) -> Self {
         match e {
@@ -68,7 +79,7 @@ impl From<ec2::DescribeInstancesError> for PollerError {
     }
 }
 
-impl Error for PollerError {
+impl StdError for PollerError {
     fn description(&self) -> &str {
         match *self {
             PollerError::InvalidCredentials(ref m) => &m,
@@ -81,7 +92,7 @@ impl Error for PollerError {
     }
 }
 
-type PollerResult<T> = Result<T, PollerError>;
+type PollerResult<T> = StdResult<T, PollerError>;
 
 pub trait Poller : Sync + Send {
     fn poll(&self);
@@ -93,7 +104,7 @@ struct CredentialsProviderWrapper {
 }
 
 impl ProvideAwsCredentials for CredentialsProviderWrapper {
-    fn credentials(&self) -> Result<AwsCredentials, CredentialsError> {
+    fn credentials(&self) -> StdResult<AwsCredentials, CredentialsError> {
         self.inner.credentials()
     }
 }
@@ -105,6 +116,7 @@ pub struct AwsPoller {
     region: Region,
     di_chunk_size: Option<i32>,
     expose_tags: Vec<String>,
+    gauges: GaugeVec
 }
 
 impl AwsPoller {
@@ -114,10 +126,15 @@ impl AwsPoller {
             region : Region::from_str(settings.region())?,
             di_chunk_size: settings.describe_instances_chunk_size(),
             expose_tags: settings.expose_tags(),
+            gauges: Self::new_gauges(settings.expose_tags())?
         };
         if let Some(e) = result.test_credentials() { Err(e)? }
         else if let Some(e) = result.test_describe_instances() { Err(e)? }
-        else { Ok(result) }
+        Ok(result)
+    }
+
+    pub fn counters(&self) -> Box<Collector> {
+        Box::new(self.gauges.clone())
     }
 
     fn new_credentials_provider(provider_type: AwsCredentialsProviderType)
@@ -136,6 +153,13 @@ impl AwsPoller {
                     Arc::new(ContainerProvider {})
             }
         })
+    }
+
+    fn new_gauges(expose_tags: Vec<String>) -> Result<GaugeVec, PrometheusError> {
+        let opts = Opts::new("AwsInstanceState", "Identifies a running AWS instance");
+        let labels : Vec<&str> = vec!["id", "platform", "type", "lifecycle"].into_iter()
+            .chain(expose_tags.iter().map(|s| &**s)).collect();
+        GaugeVec::new(opts, labels.as_slice())
     }
 
     /// Try to retrieve credentials from provider to be able to fail-fast if the credentials
@@ -163,19 +187,19 @@ impl AwsPoller {
             _ => None
         }
     }
-
 }
 
-struct DescribeInstancesIterator {
+struct DescribeInstancesIterator<'a> {
     current_page: Option<Vec<ec2::Instance>>,
     client: Ec2Client,
     req: ec2::DescribeInstancesRequest,
-    error: Option<ec2::DescribeInstancesError>,
+    error: &'a mut Option<ec2::DescribeInstancesError>,
     first_chunk: bool,
 }
 
-impl DescribeInstancesIterator {
-    fn new(client: Ec2Client, filters: Vec<ec2::Filter>, chunk_size: Option<i32>) -> Self {
+impl<'a> DescribeInstancesIterator<'a> {
+    fn new(client: Ec2Client, filters: Vec<ec2::Filter>, chunk_size: Option<i32>,
+           error: &'a mut Option<ec2::DescribeInstancesError>) -> Self {
         let mut req: ec2::DescribeInstancesRequest = Default::default();
         req.filters = Some(filters);
         req.max_results = chunk_size;
@@ -183,7 +207,7 @@ impl DescribeInstancesIterator {
             current_page: None,
             client: client,
             req: req,
-            error: None,
+            error: error,
             first_chunk: true,
         }
     }
@@ -207,14 +231,14 @@ impl DescribeInstancesIterator {
                 Some(chunk.into_iter().rev().collect())
             }
             Err(e) => {
-                self.error = Some(e);
+                *self.error = Some(e);
                 None
             }
         }
     }
 }
 
-impl Iterator for DescribeInstancesIterator {
+impl<'a> Iterator for DescribeInstancesIterator<'a> {
     type Item = ec2::Instance;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -237,19 +261,10 @@ impl Iterator for DescribeInstancesIterator {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MetricLabel {
-    key: String,
-    value: String,
-}
-
-impl From<ec2::Tag> for MetricLabel {
-    fn from(tag: ec2::Tag) -> Self {
-        MetricLabel {
-            key: tag.key.unwrap(),
-            value: tag.value.unwrap(),
-        }
-    }
+fn to_hashmap(labels: &Vec<(String, String)>) -> HashMap<&str, &str> {
+    let literals : Vec<(&str, &str)> = labels.iter().map(|l| -> (&str, &str)
+        { (&l.0, &l.1) }).collect();
+    literals.iter().cloned().collect()
 }
 
 impl Poller for AwsPoller {
@@ -258,23 +273,55 @@ impl Poller for AwsPoller {
             name: Some(String::from("instance-state-code")),
             values: Some(vec![String::from("16")])
         };
-        let di = DescribeInstancesIterator::new(self.get_ec2_client(), vec![running_filter],
-                                        self.di_chunk_size);
-        for instance in di {
-            if let Some(tags) = instance.tags {
-                let mut labels = vec![MetricLabel
-                    {
-                        key: "id".to_owned(),
-                        value: instance.instance_id.unwrap(),
-                    }];
-                let mut used_tags = tags.into_iter().filter(|t| {
-                    self.expose_tags.clone().into_iter().any(
-                        |e| t.clone().key.unwrap().eq_ignore_ascii_case(&e))
-                }).map(|t| MetricLabel::from(t))
-                    .collect::<Vec<MetricLabel>>();
-                labels.append(&mut used_tags);
-                println!("{:?}" , labels);
+        let mut current_metrics : Vec<_> = self.gauges.collect().iter().next().unwrap().get_metric().iter()
+            .map(|m| m.get_label().iter()
+                .map(|l| (l.get_name().to_owned(), l.get_value().to_owned())).collect::<HashMap<_, _>>())
+            .collect();
+        let mut query_err = None;
+        let started = precise_time_s();
+        {
+            let di = DescribeInstancesIterator::new(self.get_ec2_client(), vec![running_filter],
+                                                    self.di_chunk_size, &mut query_err);
+            for instance in di {
+                if let Some(tags) = instance.tags {
+                    let id = instance.instance_id.unwrap();
+                    let mut subsidiary_labels = vec![
+                        ("id".to_owned(), id.clone()),
+                        ("platform".to_owned(), instance.platform.unwrap_or("linux".to_owned())),
+                        ("type".to_owned(), instance.instance_type.unwrap()),
+                        ("lifecycle".to_owned(), instance.instance_lifecycle.unwrap_or("ondemand".to_owned()))
+                    ];
+                    current_metrics.retain(|m| m[&"id".to_owned()] != id);
+                    let mut labels = Vec::with_capacity(subsidiary_labels.len() + self.expose_tags.len());
+                    labels.append(&mut subsidiary_labels);
+                    for e in self.expose_tags.iter() {
+                        let m = match tags.iter().find(|&t| e.eq_ignore_ascii_case(t.key.as_ref().unwrap())) {
+                            Some(ft) => (e.clone(), ft.clone().value.unwrap()),
+                            None => (e.clone(), "".to_owned())
+                        };
+                        labels.push(m);
+                    }
+                    match self.gauges.get_metric_with(&to_hashmap(&labels)) {
+                        Ok(m) => m.set(1.0),
+                        Err(e) => println!("Error {:?} on {:?}", e, labels)
+                    }
+                }
             }
         }
+        if query_err.is_some() {
+            let _ = writeln!(&mut stderr(), "Unexpected error during instance enumeration: {:?}",
+                     query_err);
+        } else {
+            // Delete instances that are not in running state anymore
+            for m in current_metrics.iter() {
+                let labels = m.iter().map(|t| (t.0.as_str(), t.1.as_str())).collect::<HashMap<_, _>>();
+                println!("Deleting {:?}", labels["id"]);
+                if self.gauges.remove(&labels).is_err() {
+                    let _ = writeln!(&mut stderr(), "Instance disappeared?");
+                }
+            }
+        }
+        println!("Total time spent on query: {:?} sec", precise_time_s() - started);
+
     }
 }
