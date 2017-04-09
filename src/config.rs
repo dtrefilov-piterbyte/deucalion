@@ -41,31 +41,28 @@ impl Default for AwsCredentialsProviderType {
     }
 }
 
-pub trait PollerSettingsProvider {
-    fn polling_period(&self) -> Option<Duration>;
-    fn credentials_provider(&self) -> AwsCredentialsProviderType;
-    fn region(&self) -> &str;
-    fn expose_tags(&self) -> Vec<String>;
-    fn describe_instances_chunk_size(&self) -> Option<i32>;
+pub trait AwsInstancesPollerSettingsProvider {
+    fn aws_instances_poller_settings(&self) -> AwsInstancesPollerSettings;
 }
 
 pub trait ScrapeSettingsProvider {
     fn listen_on(&self) -> SocketAddr;
     fn read_timeout(&self) -> Option<Duration>;
     fn keep_alive_timeout(&self) -> Option<Duration>;
+    fn polling_period(&self) -> Option<Duration>;
 }
 
-#[derive(Serialize, Deserialize)]
-struct PollerSettings {
-    polling_period: Option<u64>,
-    credentials_provider: Option<AwsCredentialsProviderType>,
-    region: String,
-    expose_tags: Vec<String>,
-    describe_instances_chunk_size: Option<i32>,
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AwsInstancesPollerSettings {
+    pub credentials_provider: Option<AwsCredentialsProviderType>,
+    pub region: String,
+    pub expose_tags: Vec<String>,
+    pub describe_instances_chunk_size: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct  ScrapeSettings {
+    polling_period: Option<u64>,
     listen_on: SocketAddr,
     read_timeout: Option<u64>,
     keep_alive_timeout: Option<u64>,
@@ -73,7 +70,7 @@ struct  ScrapeSettings {
 
 #[derive(Serialize, Deserialize)]
 pub struct DeucalionSettings {
-    aws_settings: PollerSettings,
+    aws_instances_poller_settings: AwsInstancesPollerSettings,
     scrape_settings: ScrapeSettings
 }
 
@@ -84,30 +81,13 @@ impl DeucalionSettings {
     }
 }
 
-impl PollerSettingsProvider for DeucalionSettings {
-    fn polling_period(&self) -> Option<Duration> {
-        self.aws_settings.polling_period.map(|s| Duration::from_secs(s))
-    }
-
-    fn credentials_provider(&self) -> AwsCredentialsProviderType {
-        self.aws_settings.credentials_provider.unwrap_or(AwsCredentialsProviderType::default())
-    }
-
-    fn region(&self) -> &str {
-        &self.aws_settings.region
-    }
-
-    fn expose_tags(&self) -> Vec<String> {
-        self.aws_settings.expose_tags.clone()
-    }
-
-    fn describe_instances_chunk_size(&self) -> Option<i32> {
-        self.aws_settings.describe_instances_chunk_size
+impl AwsInstancesPollerSettingsProvider for DeucalionSettings {
+    fn aws_instances_poller_settings(&self) -> AwsInstancesPollerSettings {
+        self.aws_instances_poller_settings.clone()
     }
 }
 
 impl ScrapeSettingsProvider for DeucalionSettings {
-
     fn listen_on(&self) -> SocketAddr {
         self.scrape_settings.listen_on
     }
@@ -118,5 +98,9 @@ impl ScrapeSettingsProvider for DeucalionSettings {
 
     fn keep_alive_timeout(&self) -> Option<Duration> {
         self.scrape_settings.keep_alive_timeout.map(|s| Duration::from_secs(s))
+    }
+
+    fn polling_period(&self) -> Option<Duration> {
+        self.scrape_settings.polling_period.map(Duration::from_secs)
     }
 }

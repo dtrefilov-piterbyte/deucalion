@@ -1,4 +1,4 @@
-use config::{PollerSettingsProvider, AwsCredentialsProviderType};
+use config::{AwsInstancesPollerSettingsProvider, AwsCredentialsProviderType};
 use std::result::Result as StdResult;
 use std::error::Error as StdError;
 use std::fmt;
@@ -96,6 +96,7 @@ type PollerResult<T> = StdResult<T, PollerError>;
 
 pub trait Poller : Sync + Send {
     fn poll(&self);
+    fn counters(&self) -> Box<Collector>;
 }
 
 #[derive(Clone)]
@@ -103,42 +104,9 @@ struct CredentialsProviderWrapper {
     inner: Arc<ProvideAwsCredentials + Send + Sync>
 }
 
-impl ProvideAwsCredentials for CredentialsProviderWrapper {
-    fn credentials(&self) -> StdResult<AwsCredentials, CredentialsError> {
-        self.inner.credentials()
-    }
-}
-
-type Ec2Client = ec2::Ec2Client<CredentialsProviderWrapper, hyper::Client>;
-
-pub struct AwsPoller {
-    credentials_provider: CredentialsProviderWrapper,
-    region: Region,
-    di_chunk_size: Option<i32>,
-    expose_tags: Vec<String>,
-    gauges: GaugeVec
-}
-
-impl AwsPoller {
-    pub fn new(settings: &PollerSettingsProvider) -> PollerResult<AwsPoller> {
-        let result = AwsPoller{
-            credentials_provider: Self::new_credentials_provider(settings.credentials_provider())?,
-            region : Region::from_str(settings.region())?,
-            di_chunk_size: settings.describe_instances_chunk_size(),
-            expose_tags: settings.expose_tags(),
-            gauges: Self::new_gauges(settings.expose_tags())?
-        };
-        if let Some(e) = result.test_credentials() { Err(e)? }
-        else if let Some(e) = result.test_describe_instances() { Err(e)? }
-        Ok(result)
-    }
-
-    pub fn counters(&self) -> Box<Collector> {
-        Box::new(self.gauges.clone())
-    }
-
-    fn new_credentials_provider(provider_type: AwsCredentialsProviderType)
-        -> Result<CredentialsProviderWrapper, CredentialsError> {
+impl CredentialsProviderWrapper {
+    fn from_type(provider_type: AwsCredentialsProviderType)
+                 -> Result<CredentialsProviderWrapper, CredentialsError> {
         Ok(CredentialsProviderWrapper {
             inner: match provider_type {
                 AwsCredentialsProviderType::Default =>
@@ -154,8 +122,41 @@ impl AwsPoller {
             }
         })
     }
+}
 
-    fn new_gauges(expose_tags: Vec<String>) -> Result<GaugeVec, PrometheusError> {
+impl ProvideAwsCredentials for CredentialsProviderWrapper {
+    fn credentials(&self) -> StdResult<AwsCredentials, CredentialsError> {
+        self.inner.credentials()
+    }
+}
+
+type Ec2Client = ec2::Ec2Client<CredentialsProviderWrapper, hyper::Client>;
+
+pub struct AwsInstancesPoller {
+    credentials_provider: CredentialsProviderWrapper,
+    region: Region,
+    di_chunk_size: Option<i32>,
+    expose_tags: Vec<String>,
+    gauges: GaugeVec
+}
+
+impl AwsInstancesPoller {
+    pub fn new(settings_provider: &AwsInstancesPollerSettingsProvider) -> PollerResult<AwsInstancesPoller> {
+        let settings = settings_provider.aws_instances_poller_settings();
+        let result = AwsInstancesPoller{
+            credentials_provider: CredentialsProviderWrapper::from_type(
+                settings.credentials_provider.unwrap_or(AwsCredentialsProviderType::Default))?,
+            region : Region::from_str(&settings.region)?,
+            di_chunk_size: settings.describe_instances_chunk_size,
+            gauges: Self::new_gauges(&settings.expose_tags)?,
+            expose_tags: settings.expose_tags,
+        };
+        if let Some(e) = result.test_credentials() { Err(e)? }
+        else if let Some(e) = result.test_describe_instances() { Err(e)? }
+        Ok(result)
+    }
+
+    fn new_gauges(expose_tags: &Vec<String>) -> Result<GaugeVec, PrometheusError> {
         let opts = Opts::new("AwsInstanceState", "Identifies a running AWS instance");
         let labels : Vec<&str> = vec!["id", "platform", "type", "lifecycle"].into_iter()
             .chain(expose_tags.iter().map(|s| &**s)).collect();
@@ -294,7 +295,7 @@ fn to_hashmap(labels: &Vec<(String, String)>) -> HashMap<&str, &str> {
     literals.iter().cloned().collect()
 }
 
-impl Poller for AwsPoller {
+impl Poller for AwsInstancesPoller {
     fn poll(&self) {
         let running_filter = ec2::Filter{
             name: Some(String::from("instance-state-code")),
@@ -352,5 +353,9 @@ impl Poller for AwsPoller {
         }
         println!("Total time spent on query: {:?} sec", precise_time_s() - started);
 
+    }
+
+    fn counters(&self) -> Box<Collector> {
+        Box::new(self.gauges.clone())
     }
 }

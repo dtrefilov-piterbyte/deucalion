@@ -16,9 +16,9 @@ mod termination;
 
 use std::time::Duration;
 use hyper::server::Server;
-use config::{ScrapeSettingsProvider, PollerSettingsProvider};
+use config::{ScrapeSettingsProvider};
 use server::DeucalionHandler;
-use poller::AwsPoller;
+use poller::{Poller, AwsInstancesPoller};
 use periodic::AsyncPeriodicRunner;
 use termination::TerminationGuard;
 use prometheus::{TextEncoder, Registry};
@@ -38,19 +38,18 @@ fn main() {
 
     let config = config::DeucalionSettings::from_filename("config.yml")
         .expect("Could not load configuration");
-    let aws_poller = AwsPoller::new(&config)
+    let aws_instances_poller = AwsInstancesPoller::new(&config)
         .expect("Could not initialize AWS poller");
-    let polling_period = config.polling_period().unwrap_or(Duration::from_secs(10));
 
-    let aws_gauges = aws_poller.counters();
     let registry = Registry::new();
-    registry.register(aws_gauges).unwrap();
+    registry.register(aws_instances_poller.counters()).unwrap();
 
     let mut listening = Server::http(config.listen_on())
         .unwrap()
         .handle(DeucalionHandler::new(TextEncoder::new(), registry))
         .unwrap();
-    let _runner = AsyncPeriodicRunner::new(aws_poller, polling_period);
+    let _runner = AsyncPeriodicRunner::new(aws_instances_poller, config.polling_period()
+        .unwrap_or(Duration::from_secs(60)));
     TerminationGuard::new();
 
     let _ = listening.close();
