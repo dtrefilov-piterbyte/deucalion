@@ -13,12 +13,15 @@ mod poller;
 mod periodic;
 mod server;
 mod termination;
+mod pagination;
+mod aws_poller;
 
 use std::time::Duration;
 use hyper::server::Server;
 use config::{ScrapeSettingsProvider};
 use server::DeucalionHandler;
-use poller::{Poller, AwsInstancesPoller};
+use poller::Poller;
+use aws_poller::{AwsInstancesPoller};
 use periodic::AsyncPeriodicRunner;
 use termination::TerminationGuard;
 use prometheus::{TextEncoder, Registry};
