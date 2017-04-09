@@ -8,7 +8,7 @@ RUN apk --update upgrade && \
     update-ca-certificates && \
     rm -rf /var/cache/apk/*
 
-RUN mkdir -p /opt/deucalion
+RUN mkdir -p /opt/deucalion && rm /opt/deucalion/* -rf
 COPY target/x86_64-unknown-linux-musl/release/deucalion /opt/deucalion
 COPY config.yml /opt/deucalion
 RUN chmod +x /opt/deucalion/deucalion

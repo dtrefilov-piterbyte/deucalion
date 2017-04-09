@@ -1,7 +1,14 @@
 aws_instances_poller_settings:
     region: us-east-1
-    expose_tags: ['Name', 'team','Owner', 'Laboratory']
-    describe_instances_chunk_size: 50
+    expose_tags: ['Name', 'team', 'Owner', 'Laboratory']
+    max_chunk_size: 50
+
+aws_spot_prices_poller_settings:
+    region: us-east-1
+    #availability_zones: [ 'us-east-1a' ]
+    #instance_types: [ 'm3.xlarge' ]
+    products: [ 'Linux/UNIX', 'Windows' ]
+    max_chunk_size: 200
 
 scrape_settings:
     listen_on: 0.0.0.0:8082

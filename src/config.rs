@@ -45,6 +45,10 @@ pub trait AwsInstancesPollerSettingsProvider {
     fn aws_instances_poller_settings(&self) -> AwsInstancesPollerSettings;
 }
 
+pub trait AwsSpotPricesPollerSettingsProvider {
+    fn aws_spot_prices_poller_settings(&self) -> AwsSpotPricesPollerSettings;
+}
+
 pub trait ScrapeSettingsProvider {
     fn listen_on(&self) -> SocketAddr;
     fn read_timeout(&self) -> Option<Duration>;
@@ -57,7 +61,17 @@ pub struct AwsInstancesPollerSettings {
     pub credentials_provider: Option<AwsCredentialsProviderType>,
     pub region: String,
     pub expose_tags: Vec<String>,
-    pub describe_instances_chunk_size: Option<i32>,
+    pub max_chunk_size: Option<i32>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AwsSpotPricesPollerSettings {
+    pub credentials_provider: Option<AwsCredentialsProviderType>,
+    pub region: String,
+    pub availability_zones: Option<Vec<String>>,
+    pub products: Option<Vec<String>>,
+    pub instance_types: Option<Vec<String>>,
+    pub max_chunk_size: Option<i32>
 }
 
 #[derive(Serialize, Deserialize)]
@@ -71,6 +85,7 @@ struct  ScrapeSettings {
 #[derive(Serialize, Deserialize)]
 pub struct DeucalionSettings {
     aws_instances_poller_settings: AwsInstancesPollerSettings,
+    aws_spot_prices_poller_settings: AwsSpotPricesPollerSettings,
     scrape_settings: ScrapeSettings
 }
 
@@ -84,6 +99,12 @@ impl DeucalionSettings {
 impl AwsInstancesPollerSettingsProvider for DeucalionSettings {
     fn aws_instances_poller_settings(&self) -> AwsInstancesPollerSettings {
         self.aws_instances_poller_settings.clone()
+    }
+}
+
+impl AwsSpotPricesPollerSettingsProvider for DeucalionSettings {
+    fn aws_spot_prices_poller_settings(&self) -> AwsSpotPricesPollerSettings {
+        self.aws_spot_prices_poller_settings.clone()
     }
 }
 

@@ -1,6 +1,6 @@
 
 pub trait PaginatedRequestor {
-    type Item: 'static;
+    type Item: 'static + Clone;
     type Error: 'static;
     fn next_page(&mut self) -> Result<Option<Vec<Self::Item>>, Self::Error>;
 }
@@ -22,7 +22,8 @@ impl<'a, TR: PaginatedRequestor> PaginatedIterator<'a, TR> {
 
     fn advance_page(&mut self) {
         self.current_page = match self.requestor.next_page() {
-            Ok(p) => p,
+            Ok(Some(p)) => Some(p.iter().cloned().rev().collect()),
+            Ok(None) => None,
             Err(e) => { *self.error = Some(e); None }
         }
     }

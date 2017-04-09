@@ -1,4 +1,5 @@
-use config::{AwsInstancesPollerSettingsProvider, AwsCredentialsProviderType};
+use config::{AwsInstancesPollerSettingsProvider, AwsSpotPricesPollerSettingsProvider,
+             AwsCredentialsProviderType};
 use std::result::Result as StdResult;
 use std::error::Error as StdError;
 use std::fmt;
@@ -10,12 +11,10 @@ use rusoto::{ProvideAwsCredentials, AwsCredentials, DefaultCredentialsProviderSy
              Region, ParseRegionError, HttpDispatchError};
 use rusoto::ec2;
 use rusoto::default_tls_client;
-use hyper;
 use std::ascii::AsciiExt;
 use std::iter::{Iterator, IntoIterator};
 use prometheus::{Opts, GaugeVec, Collector};
 use prometheus::Error as PrometheusError;
-use time::precise_time_s;
 use std::collections::HashMap;
 use pagination::{PaginatedIterator, PaginatedRequestor};
 use poller::Poller;
@@ -81,6 +80,28 @@ impl From<ec2::DescribeInstancesError> for AwsPollerError {
     }
 }
 
+impl From<ec2::DescribeSpotPriceHistoryError> for AwsPollerError {
+
+    fn from(e: ec2::DescribeSpotPriceHistoryError) -> Self {
+        match e {
+            ec2::DescribeSpotPriceHistoryError::HttpDispatch(dpt) => AwsPollerError::from(dpt),
+            ec2::DescribeSpotPriceHistoryError::Credentials(crd) => AwsPollerError::from(crd),
+            ec2::DescribeSpotPriceHistoryError::Validation(s) => AwsPollerError::InvalidCredentials(s),
+            ec2::DescribeSpotPriceHistoryError::Unknown(s) => {
+                if s.contains("DryRunOperation") {
+                    AwsPollerError::NoError
+                } else if s.contains("UnauthorizedOperation") {
+                    AwsPollerError::InsufficientPermissions(String::from("DescribeInstances"))
+                } else if s.contains("AuthFailure") {
+                    AwsPollerError::InvalidCredentials(s)
+                } else {
+                    AwsPollerError::UnknownError(s)
+                }
+            }
+        }
+    }
+}
+
 impl StdError for AwsPollerError {
     fn description(&self) -> &str {
         match *self {
@@ -119,6 +140,12 @@ impl CredentialsProviderWrapper {
             }
         })
     }
+
+    /// Try to retrieve credentials from provider to be able to fail-fast if credentials
+    /// are not available.
+    fn test(&self) -> Option<AwsPollerError> {
+        self.credentials().err().map(|e| AwsPollerError::from(e))
+    }
 }
 
 impl ProvideAwsCredentials for CredentialsProviderWrapper {
@@ -127,12 +154,12 @@ impl ProvideAwsCredentials for CredentialsProviderWrapper {
     }
 }
 
-type Ec2Client = ec2::Ec2Client<CredentialsProviderWrapper, hyper::Client>;
+type Ec2Client = ec2::Ec2Client<CredentialsProviderWrapper, ::hyper::Client>;
 
 pub struct AwsInstancesPoller {
     credentials_provider: CredentialsProviderWrapper,
     region: Region,
-    di_chunk_size: Option<i32>,
+    max_chunk_size: Option<i32>,
     expose_tags: Vec<String>,
     gauges: GaugeVec
 }
@@ -144,25 +171,20 @@ impl AwsInstancesPoller {
             credentials_provider: CredentialsProviderWrapper::from_type(
                 settings.credentials_provider.unwrap_or(AwsCredentialsProviderType::Default))?,
             region: Region::from_str(&settings.region)?,
-            di_chunk_size: settings.describe_instances_chunk_size,
+            max_chunk_size: settings.max_chunk_size,
             gauges: Self::new_gauges(&settings.expose_tags)?,
             expose_tags: settings.expose_tags,
         };
-        if let Some(e) = result.test_credentials() { Err(e)? } else if let Some(e) = result.test_describe_instances() { Err(e)? }
+        if let Some(e) = result.credentials_provider.test() { Err(e)? }
+            else if let Some(e) = result.test_describe_instances() { Err(e)? }
         Ok(result)
     }
 
     fn new_gauges(expose_tags: &Vec<String>) -> Result<GaugeVec, PrometheusError> {
         let opts = Opts::new("AwsInstanceState", "Identifies a running AWS instance");
-        let labels: Vec<&str> = vec!["id", "platform", "type", "lifecycle"].into_iter()
+        let labels: Vec<&str> = vec!["id", "availability_zone", "platform", "type", "lifecycle"].into_iter()
             .chain(expose_tags.iter().map(|s| &**s)).collect();
         GaugeVec::new(opts, labels.as_slice())
-    }
-
-    /// Try to retrieve credentials from provider to be able to fail-fast if the credentials
-    /// are not available.
-    fn test_credentials(&self) -> Option<AwsPollerError> {
-        self.credentials_provider.credentials().err().map(|e| AwsPollerError::from(e))
     }
 
     fn get_ec2_client(&self) -> Ec2Client {
@@ -186,53 +208,6 @@ impl AwsInstancesPoller {
     }
 }
 
-struct DescribeInstancesRequestor {
-    client: Ec2Client,
-    req: ec2::DescribeInstancesRequest,
-    first_chunk: bool
-}
-
-impl PaginatedRequestor for DescribeInstancesRequestor {
-    type Item = ec2::Instance;
-    type Error = ec2::DescribeInstancesError;
-    fn next_page(&mut self) -> Result<Option<Vec<Self::Item>>, Self::Error> {
-        if self.req.next_token.is_none() && !self.first_chunk {
-            return Ok(None);
-        }
-        self.first_chunk = false;
-        match self.client.describe_instances(&self.req) {
-            Ok(ref mut resp) => {
-                let mut chunk = vec![];
-                if let Some(ref mut reservations) = resp.reservations {
-                    for r in reservations {
-                        if let Some(ref mut instances) = r.instances {
-                            chunk.append(instances);
-                        }
-                    }
-                }
-                self.req.next_token = resp.next_token.clone();
-                Ok(Some(chunk.into_iter().rev().collect()))
-            }
-            Err(e) => {
-                Err(e)
-            }
-        }
-    }
-}
-
-impl DescribeInstancesRequestor {
-    fn new(client: Ec2Client, filters: Vec<ec2::Filter>, chunk_size: Option<i32>) -> Self {
-        let mut req: ec2::DescribeInstancesRequest = Default::default();
-        req.filters = Some(filters);
-        req.max_results = chunk_size;
-        DescribeInstancesRequestor {
-            client: client,
-            req: req,
-            first_chunk: true,
-        }
-    }
-}
-
 fn to_hashmap(labels: &Vec<(String, String)>) -> HashMap<&str, &str> {
     let literals: Vec<(&str, &str)> = labels.iter().map(|l| -> (&str, &str)
         { (&l.0, &l.1) }).collect();
@@ -250,10 +225,9 @@ impl Poller for AwsInstancesPoller {
                 .map(|l| (l.get_name().to_owned(), l.get_value().to_owned())).collect::<HashMap<_, _>>())
             .collect();
         let mut query_err = None;
-        let started = precise_time_s();
         {
             let di = PaginatedIterator::new(
-                DescribeInstancesRequestor::new(self.get_ec2_client(), vec![running_filter], self.di_chunk_size),
+                DescribeInstancesRequestor::new(self.get_ec2_client(), vec![running_filter], self.max_chunk_size),
                 &mut query_err);
 
             for instance in di {
@@ -261,6 +235,7 @@ impl Poller for AwsInstancesPoller {
                     let id = instance.instance_id.unwrap();
                     let mut subsidiary_labels = vec![
                         ("id".to_owned(), id.clone()),
+                        ("availability_zone".to_owned(), instance.placement.unwrap().availability_zone.unwrap()),
                         ("platform".to_owned(), instance.platform.unwrap_or("linux".to_owned())),
                         ("type".to_owned(), instance.instance_type.unwrap()),
                         ("lifecycle".to_owned(), instance.instance_lifecycle.unwrap_or("ondemand".to_owned()))
@@ -295,10 +270,206 @@ impl Poller for AwsInstancesPoller {
                 }
             }
         }
-        println!("Total time spent on query: {:?} sec", precise_time_s() - started);
     }
 
     fn counters(&self) -> Box<Collector> {
         Box::new(self.gauges.clone())
+    }
+}
+
+struct DescribeInstancesRequestor {
+    client: Ec2Client,
+    req: ec2::DescribeInstancesRequest,
+    first_chunk: bool
+}
+
+impl PaginatedRequestor for DescribeInstancesRequestor {
+    type Item = ec2::Instance;
+    type Error = ec2::DescribeInstancesError;
+    fn next_page(&mut self) -> Result<Option<Vec<Self::Item>>, Self::Error> {
+        if self.req.next_token.is_none() && !self.first_chunk {
+            return Ok(None);
+        }
+        self.first_chunk = false;
+        match self.client.describe_instances(&self.req) {
+            Ok(ref mut resp) => {
+                let mut chunk = Vec::with_capacity(self.req.max_results.unwrap_or(0) as usize);
+                if let Some(ref mut reservations) = resp.reservations {
+                    for r in reservations {
+                        if let Some(ref mut instances) = r.instances {
+                            chunk.append(instances);
+                        }
+                    }
+                }
+                self.req.next_token = resp.next_token.clone();
+                Ok(Some(chunk))
+            }
+            Err(e) => {
+                Err(e)
+            }
+        }
+    }
+}
+
+impl DescribeInstancesRequestor {
+    fn new(client: Ec2Client, filters: Vec<ec2::Filter>, chunk_size: Option<i32>) -> Self {
+        let mut req: ec2::DescribeInstancesRequest = Default::default();
+        req.filters = if filters.is_empty() { None } else { Some(filters) };
+        req.max_results = chunk_size;
+        DescribeInstancesRequestor {
+            client: client,
+            req: req,
+            first_chunk: true,
+        }
+    }
+}
+
+pub struct AwsSpotPricesPoller {
+    credentials_provider: CredentialsProviderWrapper,
+    region: Region,
+    max_chunk_size: Option<i32>,
+    availability_zones: Option<Vec<String>>,
+    products: Option<Vec<String>>,
+    instance_types: Option<Vec<String>>,
+    gauges: GaugeVec
+}
+
+impl AwsSpotPricesPoller {
+    pub fn new(settings_provider: &AwsSpotPricesPollerSettingsProvider) -> PollerResult<Self> {
+        let settings = settings_provider.aws_spot_prices_poller_settings();
+        let result = AwsSpotPricesPoller {
+            credentials_provider: CredentialsProviderWrapper::from_type(
+                settings.credentials_provider.unwrap_or(AwsCredentialsProviderType::Default))?,
+            region: Region::from_str(&settings.region)?,
+            max_chunk_size: settings.max_chunk_size,
+            availability_zones: settings.availability_zones,
+            products: settings.products,
+            instance_types: settings.instance_types,
+            gauges: Self::new_gauges()?,
+        };
+        if let Some(e) = result.credentials_provider.test() { Err(e)? }
+            else if let Some(e) = result.test_describe_spot_prices() { Err(e)? }
+        Ok(result)
+    }
+
+    fn new_gauges() -> Result<GaugeVec, PrometheusError> {
+        let opts = Opts::new("AwsSpotPrices", "Identifies a history of spot prices");
+        GaugeVec::new(opts, &["availability_zone", "platform", "type"])
+    }
+
+    fn get_ec2_client(&self) -> Ec2Client {
+        Ec2Client::new(default_tls_client().unwrap(), self.credentials_provider.clone(), self.region)
+    }
+
+    fn test_describe_spot_prices(&self) -> Option<AwsPollerError> {
+        let client = self.get_ec2_client();
+        let mut req: ec2::DescribeSpotPriceHistoryRequest = Default::default();
+        req.dry_run = Some(true);
+
+        match client.describe_spot_price_history(&req) {
+            Err(e) => {
+                match AwsPollerError::from(e) {
+                    AwsPollerError::NoError => None,
+                    e => Some(e)
+                }
+            }
+            _ => None
+        }
+    }
+
+    fn product_to_platform(product: &str) -> Option<&str> {
+        match product {
+            "Linux/UNIX" => Some("linux"),
+            "Windows" => Some("windows"),
+            _ => None
+        }
+    }
+}
+
+impl Poller for AwsSpotPricesPoller {
+    fn poll(&self) {
+        let mut query_err = None;
+        {
+            let mut filters = Vec::with_capacity(3);
+            if let Some(ref az) = self.availability_zones {
+                filters.push(ec2::Filter {
+                    name: Some("availability-zone".to_owned()),
+                    values: Some(az.clone())
+                });
+            }
+            let spot_prices_iterator = PaginatedIterator::new(
+                DescribeSpotPricesRequestor::new(self.get_ec2_client(), filters,
+                                                 self.products.clone(), self.instance_types.clone(),
+                                                 self.max_chunk_size),
+                &mut query_err);
+            for sp in spot_prices_iterator {
+                let labels = vec![
+                    ("availability_zone".to_owned(), sp.availability_zone.unwrap()),
+                    ("platform".to_owned(), Self::product_to_platform(&sp.product_description.unwrap()).unwrap_or("").to_owned()),
+                    ("type".to_owned(), sp.instance_type.unwrap())
+                ];
+                match self.gauges.get_metric_with(&to_hashmap(&labels)) {
+                    Ok(m) => m.set(1.0),
+                    Err(e) => println!("Error {:?} on {:?}", e, labels)
+                }
+            }
+        }
+    }
+
+    fn counters(&self) -> Box<Collector> {
+        Box::new(self.gauges.clone())
+    }
+}
+
+struct DescribeSpotPricesRequestor {
+    client: Ec2Client,
+    req: ec2::DescribeSpotPriceHistoryRequest,
+    first_chunk: bool
+}
+
+impl PaginatedRequestor for DescribeSpotPricesRequestor {
+    type Item = ec2::SpotPrice;
+    type Error = ec2::DescribeSpotPriceHistoryError;
+    fn next_page(&mut self) -> Result<Option<Vec<Self::Item>>, Self::Error> {
+        if self.req.next_token.is_none() && !self.first_chunk {
+            return Ok(None);
+        }
+        self.first_chunk = false;
+        match self.client.describe_spot_price_history(&self.req) {
+            Ok(resp) => {
+                // handle empty next_token
+                self.req.next_token = if let Some(ref s) = resp.next_token {
+                    match s.as_ref() {
+                        "" => None,
+                        _ => Some(s.clone())
+                    }
+                } else {
+                    None
+                };
+                Ok(resp.spot_price_history)
+            }
+            Err(e) => {
+                Err(e)
+            }
+        }
+    }
+}
+
+impl DescribeSpotPricesRequestor {
+    fn new(client: Ec2Client, filters: Vec<ec2::Filter>,
+           products: Option<Vec<String>>, instance_types: Option<Vec<String>>,
+           chunk_size: Option<i32>) -> Self {
+        let mut req: ec2::DescribeSpotPriceHistoryRequest = Default::default();
+        req.max_results = chunk_size;
+        req.end_time = Some(format!("{}", ::time::now_utc().strftime("%FT%T").unwrap()));
+        req.start_time = req.end_time.clone();
+        req.filters = if filters.is_empty() { None } else { Some(filters) };
+        req.product_descriptions = products;
+        req.instance_types = instance_types;
+        DescribeSpotPricesRequestor {
+            client: client,
+            req: req,
+            first_chunk: true,
+        }
     }
 }
