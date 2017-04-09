@@ -189,32 +189,24 @@ impl AwsPoller {
     }
 }
 
-struct DescribeInstancesIterator<'a> {
-    current_page: Option<Vec<ec2::Instance>>,
-    client: Ec2Client,
-    req: ec2::DescribeInstancesRequest,
-    error: &'a mut Option<ec2::DescribeInstancesError>,
-    first_chunk: bool,
+trait PaginatedRequestor {
+    type Item: 'static;
+    type Error: 'static;
+    fn next_page(&mut self) -> Result<Option<Vec<Self::Item>>, Self::Error>;
 }
 
-impl<'a> DescribeInstancesIterator<'a> {
-    fn new(client: Ec2Client, filters: Vec<ec2::Filter>, chunk_size: Option<i32>,
-           error: &'a mut Option<ec2::DescribeInstancesError>) -> Self {
-        let mut req: ec2::DescribeInstancesRequest = Default::default();
-        req.filters = Some(filters);
-        req.max_results = chunk_size;
-        DescribeInstancesIterator {
-            current_page: None,
-            client: client,
-            req: req,
-            error: error,
-            first_chunk: true,
-        }
-    }
+struct DescribeInstancesRequestor {
+    client: Ec2Client,
+    req: ec2::DescribeInstancesRequest,
+    first_chunk: bool
+}
 
-    fn next_page(&mut self) -> Option<Vec<ec2::Instance>> {
+impl PaginatedRequestor for DescribeInstancesRequestor {
+    type Item = ec2::Instance;
+    type Error = ec2::DescribeInstancesError;
+    fn next_page(&mut self) -> Result<Option<Vec<Self::Item>>, Self::Error> {
         if self.req.next_token.is_none() && !self.first_chunk {
-            return None;
+            return Ok(None);
         }
         self.first_chunk = false;
         match self.client.describe_instances(&self.req) {
@@ -228,22 +220,57 @@ impl<'a> DescribeInstancesIterator<'a> {
                     }
                 }
                 self.req.next_token = resp.next_token.clone();
-                Some(chunk.into_iter().rev().collect())
+                Ok(Some(chunk.into_iter().rev().collect()))
             }
             Err(e) => {
-                *self.error = Some(e);
-                None
+                Err(e)
             }
         }
     }
 }
 
-impl<'a> Iterator for DescribeInstancesIterator<'a> {
-    type Item = ec2::Instance;
+impl DescribeInstancesRequestor {
+    fn new(client: Ec2Client, filters: Vec<ec2::Filter>, chunk_size: Option<i32>) -> Self {
+        let mut req: ec2::DescribeInstancesRequest = Default::default();
+        req.filters = Some(filters);
+        req.max_results = chunk_size;
+        DescribeInstancesRequestor {
+            client: client,
+            req: req,
+            first_chunk: true,
+        }
+    }
+}
+
+struct PaginatedIterator<'a, TR: PaginatedRequestor> {
+    requestor: TR,
+    current_page: Option<Vec<TR::Item>>,
+    error: &'a mut Option<TR::Error>
+}
+
+impl<'a, TR: PaginatedRequestor> PaginatedIterator<'a, TR> {
+    fn new(requestor: TR, error: &'a mut Option<TR::Error>) -> Self {
+        PaginatedIterator {
+            requestor: requestor,
+            current_page: None,
+            error: error
+        }
+    }
+
+    fn advance_page(&mut self) {
+        self.current_page = match self.requestor.next_page() {
+            Ok(p) => p,
+            Err(e) => { *self.error = Some(e); None }
+        }
+    }
+}
+
+impl<'a, TR: PaginatedRequestor> Iterator for PaginatedIterator<'a, TR> {
+    type Item = TR::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.current_page.is_none() {
-            self.current_page = self.next_page();
+            self.advance_page();
             if self.current_page.is_none() {
                 return None;
             }
@@ -251,7 +278,7 @@ impl<'a> Iterator for DescribeInstancesIterator<'a> {
         match self.current_page.as_mut().unwrap().pop() {
             Some(i) => Some(i),
             None => {
-                self.current_page = self.next_page();
+                self.advance_page();
                 match self.current_page {
                     Some(_) => self.next(),
                     None => None
@@ -280,8 +307,10 @@ impl Poller for AwsPoller {
         let mut query_err = None;
         let started = precise_time_s();
         {
-            let di = DescribeInstancesIterator::new(self.get_ec2_client(), vec![running_filter],
-                                                    self.di_chunk_size, &mut query_err);
+            let di = PaginatedIterator::new(
+                DescribeInstancesRequestor::new(self.get_ec2_client(), vec![running_filter], self.di_chunk_size),
+                &mut query_err);
+
             for instance in di {
                 if let Some(tags) = instance.tags {
                     let id = instance.instance_id.unwrap();
