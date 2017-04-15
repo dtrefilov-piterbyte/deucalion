@@ -182,7 +182,7 @@ impl AwsInstancesPoller {
 
     fn new_gauges(expose_tags: &Vec<String>) -> Result<GaugeVec, PrometheusError> {
         let opts = Opts::new("AwsInstanceState", "Identifies a running AWS instance");
-        let labels: Vec<&str> = vec!["id", "availability_zone", "platform", "type", "lifecycle"].into_iter()
+        let labels: Vec<&str> = vec!["id", "availability_zone", "platform", "type", "lifecycle", "networking"].into_iter()
             .chain(expose_tags.iter().map(|s| &**s)).collect();
         GaugeVec::new(opts, labels.as_slice())
     }
@@ -238,7 +238,8 @@ impl Poller for AwsInstancesPoller {
                         ("availability_zone".to_owned(), instance.placement.unwrap().availability_zone.unwrap()),
                         ("platform".to_owned(), instance.platform.unwrap_or("linux".to_owned())),
                         ("type".to_owned(), instance.instance_type.unwrap()),
-                        ("lifecycle".to_owned(), instance.instance_lifecycle.unwrap_or("ondemand".to_owned()))
+                        ("lifecycle".to_owned(), instance.instance_lifecycle.unwrap_or("ondemand".to_owned())),
+                        ("networking".to_owned(), if instance.vpc_id.is_some() { "vpc".to_owned() } else { "classic".to_owned() })
                     ];
                     current_metrics.retain(|m| m[&"id".to_owned()] != id);
                     let mut labels = Vec::with_capacity(subsidiary_labels.len() + self.expose_tags.len());
@@ -354,7 +355,7 @@ impl AwsSpotPricesPoller {
 
     fn new_gauges() -> Result<GaugeVec, PrometheusError> {
         let opts = Opts::new("AwsSpotPrices", "Identifies a history of spot prices");
-        GaugeVec::new(opts, &["availability_zone", "platform", "type"])
+        GaugeVec::new(opts, &["availability_zone", "platform", "type", "networking"])
     }
 
     fn get_ec2_client(&self) -> Ec2Client {
@@ -381,6 +382,18 @@ impl AwsSpotPricesPoller {
         match product {
             "Linux/UNIX" => Some("linux"),
             "Windows" => Some("windows"),
+            "Linux/UNIX (Amazon VPC)" => Some("linux"),
+            "Windows (Amazon VPC)" => Some("windows"),
+            _ => None
+        }
+    }
+
+    fn product_to_networking(product: &str) -> Option<&str> {
+        match product {
+            "Linux/UNIX" => Some("classic"),
+            "Windows" => Some("classic"),
+            "Linux/UNIX (Amazon VPC)" => Some("vpc"),
+            "Windows (Amazon VPC)" => Some("vpc"),
             _ => None
         }
     }
@@ -403,13 +416,15 @@ impl Poller for AwsSpotPricesPoller {
                                                  self.max_chunk_size),
                 &mut query_err);
             for sp in spot_prices_iterator {
+                let product = sp.product_description.unwrap_or(String::new());
                 let labels = vec![
-                    ("availability_zone".to_owned(), sp.availability_zone.unwrap()),
-                    ("platform".to_owned(), Self::product_to_platform(&sp.product_description.unwrap()).unwrap_or("").to_owned()),
-                    ("type".to_owned(), sp.instance_type.unwrap())
+                    ("availability_zone".to_owned(), sp.availability_zone.unwrap_or(String::new())),
+                    ("platform".to_owned(), Self::product_to_platform(&product).unwrap_or("").to_owned()),
+                    ("networking".to_owned(), Self::product_to_networking(&product).unwrap_or("").to_owned()),
+                    ("type".to_owned(), sp.instance_type.unwrap_or(String::new()))
                 ];
                 match self.gauges.get_metric_with(&to_hashmap(&labels)) {
-                    Ok(m) => m.set(1.0),
+                    Ok(m) => m.set(sp.spot_price.unwrap_or(String::new()).parse::<f64>().unwrap_or(0.0)),
                     Err(e) => println!("Error {:?} on {:?}", e, labels)
                 }
             }

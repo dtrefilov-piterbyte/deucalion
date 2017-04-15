@@ -7,7 +7,7 @@ aws_spot_prices_poller_settings:
     region: us-east-1
     #availability_zones: [ 'us-east-1a' ]
     #instance_types: [ 'm3.xlarge' ]
-    products: [ 'Linux/UNIX', 'Windows' ]
+    products: [ 'Linux/UNIX', 'Windows', 'Linux/UNIX (Amazon VPC)', 'Windows (Amazon VPC)' ]
     max_chunk_size: 200
 
 scrape_settings:
